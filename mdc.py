@@ -43,7 +43,6 @@ def clean_strain_sweep(buffer):
     df.insert(loc=14, column="G* (Pa)", value=gstar)
     df["G* (Pa)_smooth"] = df["G* (Pa)"].rolling(window=3, center=True).mean() 
 
-
     return df
 
 
@@ -84,7 +83,6 @@ def clean_temp_sweep(buffer):
     gstar = np.sqrt(df["G' (Pa)"]**2 + df["G'' (Pa)"]**2)
     df.insert(loc=5, column="G* (Pa)", value=gstar)
     df["G* (Pa)_smooth"] = df["G* (Pa)"].rolling(window=20, center=True).mean()
-
 
     return df
 
@@ -128,18 +126,14 @@ tab_graph, tab_key, tab_data = st.tabs(["Graph Interface","Key Values","Data Int
 
 
 # — Graph Interface —
-# — Graph Interface —
 with tab_graph:
     st.subheader(f"{mode} Graphs")
 
     if mode == "Strain Sweep":
         phase = st.radio("Phase", ["Both","Go","Return"], horizontal=True)
-    else:
-        phase = "Both"
-
-    if mode == "Strain Sweep":
         x_axis  = "dyn Str"
-    else:
+    elif mode == "Temperature Sweep":
+        phase = "Both"
         x_axis  = "Temperature (°C)"
         
     metrics = ["G' (Pa)", "G'' (Pa)", "G* (Pa)", "Tan Delta"]
@@ -156,6 +150,7 @@ with tab_graph:
                     df = df.loc[:peak]
                 elif phase=="Return":
                     df = df.loc[peak:]
+
                 df = df[df[x_axis]>0]
 
                 y = df[f"{metric}_smooth"] if metric!="G* (Pa)" else df["G* (Pa)_smooth"]
@@ -277,7 +272,7 @@ with tab_key:
             "Tan D MAX Go",
             "G* def MAX / G* def MIN"
         ]
-    else:
+    elif mode == "Temperature Sweep":
         key_names = [
             "Stress",
             "Machine #",
@@ -306,18 +301,18 @@ with tab_key:
             "G''/G*² MAX",
             "Integrale G''",
             "Integrale Tan D",
-            "Integrale [0°C–25°C]",
-            "Integrale Tan [-70°C–0°C]",
-            "Integrale Tan [-70°C–-30°C]",
-            "Integrale Tan [-40°C–50°C]",
-            "Integrale Tan [-37°C–10°C]",
-            "Integrale Tan [-10°C–10°C]",
-            "Integrale Tan [-10°C–25°C]",
+            "Integrale [0°C.25°C]",
+            "Integrale Tan [-70°C.0°C]",
+            "Integrale Tan [-70°C.-30°C]",
+            "Integrale Tan [-40°C.50°C]",
+            "Integrale Tan [-37°C.10°C]",
+            "Integrale Tan [-10°C.10°C]",
+            "Integrale Tan [-10°C.25°C]",
             "J'' -30°C (MPa⁻¹)",
             "J'' -20°C (MPa⁻¹)",
             "J'' -10°C (MPa⁻¹)",
             "J'' 60°C (MPa⁻¹)",
-            "Slope (G*98°C–G*75°C)/ΔT",
+            "Slope (G*98°C-G*75°C)/ΔT",
             "T (°C) G'' MAX",
             "T (°C) G''/G*² MAX",
             "T (°C) Tan D MAX",
@@ -335,11 +330,11 @@ with tab_key:
             "Tan 100°C",
             "Tan MAX",
             "Tan Elastomer (°C)",
-            "Temp (°C) G*=1.5 MPa",
-            "Temp (°C) G*=3 MPa",
-            "Temp (°C) G*=5 MPa",
-            "Temp (°C) G*=10 MPa",
-            "Temp (°C) G*=100 MPa"
+            "Temp (°C) G*=1.5MPa",
+            "Temp (°C) G*=3MPa",
+            "Temp (°C) G*=5MPa",
+            "Temp (°C) G*=10MPa",
+            "Temp (°C) G*=100MPa"
         ]
 
     # file names as columns, without extension
@@ -347,8 +342,6 @@ with tab_key:
 
     # assemble empty DataFrame
     summary_df = pd.DataFrame(index=key_names, columns=cols)
-
-    # display with scrollbars for readability
     st.dataframe(summary_df, use_container_width=True, height=600)
 
 
