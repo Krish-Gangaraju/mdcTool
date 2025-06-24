@@ -46,7 +46,6 @@ def clean_strain_sweep(buffer):
     return df
 
 
-
 @st.cache_data
 def clean_temp_sweep(buffer):
     raw = buffer.readlines() if hasattr(buffer, "readlines") else open(buffer, 'rb').readlines()
@@ -87,6 +86,20 @@ def clean_temp_sweep(buffer):
     return df
 
 
+@st.cache_data
+def aggregate_by_degree(df: pd.DataFrame, degree_col: str, smooth_cols: list[str]) -> pd.DataFrame:
+    # make a copy and round the degree column to ints
+    df_ = df.copy()
+    df_['deg'] = df_[degree_col].round().astype(int)
+    # group by that integer degree, average all the smoothed metrics
+    agg = (
+        df_
+        .groupby('deg')[smooth_cols]
+        .mean()
+        .reset_index()
+        .rename(columns={'deg': degree_col})
+    )
+    return agg
 
 
 # ——— Streamlit UI ———
@@ -111,12 +124,19 @@ for f in uploaded:
 if not processed:
     st.stop()
 
+if mode=="Temperature Sweep":
+    raw_force_aggs = {name: df.assign(deg=df['Temperature (°C)'].round().astype(int), dynF=pd.to_numeric(df['dyn F (N)'],errors='coerce')).groupby('deg')['dynF'].mean() for name,df in processed.items()}
+    raw_val_aggs   = {name: df.assign(deg=df['Temperature (°C)'].round().astype(int)).groupby('deg')[["G'' (Pa)","G* (Pa)","Tan Delta"]].mean() for name,df in processed.items()}
+
+
+
 st.subheader("Select mixes to plot")
 mixes = []
 for name in sorted(processed):
     label = name.rsplit('.',1)[0]
     if st.checkbox(label, value=True, key=f"cb_{name}"):
         mixes.append(name)
+
 if not mixes:
     st.info("Select at least one mix to see the panels.")
     st.stop()
@@ -193,6 +213,8 @@ with tab_graph:
         else:
             ax.set_xlim(df[x_axis].min(), df[x_axis].max())
 
+        ax.set_ylim(bottom=0)
+        ax.margins(y=0)
         ax.set_xlabel(x_axis)
         ax.set_ylabel(y_label)
         if mode == "Strain Sweep":
@@ -208,141 +230,67 @@ with tab_graph:
 # — Key Values Interface —
 with tab_key:
     st.subheader("Key Values")
-
-    # choose the appropriate set of keys
-    if mode == "Strain Sweep":
+    if mode=="Temperature Sweep":
         key_names = [
-            "Tempe",
-            "Machine #",
-            "% Accomodation = Accomodation / G* Go",
-            "Accomodation = G* DEF MIN Go - Return",
-            "Calcul NL = G*DEF MIN - G*DEF MAX Go",
-            "Calcul NL = G*DEF MIN - G*DEF MAX Return",
-            "DEFORMATION G\" MAX (%) Go",
-            "DEFORMATION G\" MAX (%) Return",
-            "DEFORMATION Tg MAX Go (%)",
-            "DEFORMATION Tg MAX Return (%)",
-            "G' 10% Return",
-            "G' 35% Return (MPa)",
-            "G' DEF MIN Go (MPa)",
-            "G' DEF MIN Return (MPa)",
-            "G' DEF MAX Go (MPa)",
-            "G' DEF MAX Return (MPa)",
-            "G'' 10% Go (MPa)",
-            "G'' 10% Return (MPa)",
-            "G'' 20% Return (MPa)",
-            "G'' 35% Return (MPa)",
-            "G'' MAX Return (MPa)",
-            "G'' DEF MIN Return (MPa)",
-            "G* 0.2% Go (MPa)",
-            "G* 0.2% Return (MPa)",
-            "G* 0.6% Return (MPa)",
-            "G* 1% Go (MPa)",
-            "G* 1% Return (MPa)",
-            "G* 2% Go (MPa)",
-            "G* 2% Return (MPa)",
-            "G* 10% Go (MPa)",
-            "G* 10% Return (MPa)",
-            "G* 15% Go (MPa)",
-            "G* 15% Return (MPa)",
-            "G* 20% Go (MPa)",
-            "G* 20% Return (MPa)",
-            "G* 25% Go (MPa)",
-            "G* 25% Return (MPa)",
-            "G* 50% Go (MPa)",
-            "G* 50% Return (MPa)",
-            "G* 97% Go (MPa)",
-            "G* 97% Return (MPa)",
-            "G* DEF MIN Go (MPa)",
-            "G* DEF MIN Return (MPa)",
-            "G* DEF MAX Go (MPa)",
-            "G* DEF MAX Return (MPa)",
-            "Intégrale G\" Return",
-            "Intégrale tand Return",
-            "Tan D - 0.1% Return",
-            "Tan D - 1% Go",
-            "Tan D - 1% Return",
-            "Tan D - 10% Go",
-            "Tan D - 10% Return",
-            "Tan D - 20% Go",
-            "Tan D - 20% Return",
-            "Tan D MAX Return",
-            "Tan D DEF MAX Return",
-            "Tan D DEF MIN Return",
-            "Tan D MAX Go",
-            "G* def MAX / G* def MIN"
+            "Def % -20°C","Def % -10°C","Def % 10°C","Def % 30°C","Def % 60°C","Def % 100°C",
+            "G'' 10°C (MPa)","G'' 90°C (MPa)","G'' MAX (MPa)",
+            "G* -30°C (MPa)","G* -20°C (MPa)","G* -10°C (MPa)","G* 0°C (MPa)","G* 10°C (MPa)",
+            "G* 20°C (MPa)","G* 30°C (MPa)","G* 40°C (MPa)","G* 50°C (MPa)","G* 60°C (MPa)",
+            "G* 90°C (MPa)","G* 100°C (MPa)","G\"/G*² -20°C","G\"/G*² MAX",
+            "Slope (G*98°C-G*75°C)/ΔT","T (°C) G'' MAX","T (°C) G''/G*² MAX","T (°C) Tan D MAX",
+            "Tan -30°C","Tan -20°C","Tan -10°C","Tan 0°C","Tan 10°C","Tan 20°C",
+            "Tan 30°C","Tan 40°C","Tan 50°C","Tan 60°C","Tan 90°C","Tan 100°C",
+            "Tan MAX","Tan Elastomer (°C)",
+            "Temp (°C) G*=1.5MPa","Temp (°C) G*=3MPa","Temp (°C) G*=5MPa","Temp (°C) G*=10MPa","Temp (°C) G*=100MPa"
         ]
-    elif mode == "Temperature Sweep":
-        key_names = [
-            "Stress",
-            "Machine #",
-            "Def % -20°C",
-            "Def % -10°C",
-            "Def % 10°C",
-            "Def % 30°C",
-            "Def % 60°C",
-            "Def % 100°C",
-            "G'' 10°C (MPa)",
-            "G'' 90°C (MPa)",
-            "G'' MAX (MPa)",
-            "G* -30°C (MPa)",
-            "G* -20°C (MPa)",
-            "G* -10°C (MPa)",
-            "G* 0°C (MPa)",
-            "G* 10°C (MPa)",
-            "G* 20°C (MPa)",
-            "G* 30°C (MPa)",
-            "G* 40°C (MPa)",
-            "G* 50°C (MPa)",
-            "G* 60°C (MPa)",
-            "G* 90°C (MPa)",
-            "G* 100°C (MPa)",
-            "G''/G*² -20°C",
-            "G''/G*² MAX",
-            "Integrale G''",
-            "Integrale Tan D",
-            "Integrale [0°C.25°C]",
-            "Integrale Tan [-70°C.0°C]",
-            "Integrale Tan [-70°C.-30°C]",
-            "Integrale Tan [-40°C.50°C]",
-            "Integrale Tan [-37°C.10°C]",
-            "Integrale Tan [-10°C.10°C]",
-            "Integrale Tan [-10°C.25°C]",
-            "J'' -30°C (MPa⁻¹)",
-            "J'' -20°C (MPa⁻¹)",
-            "J'' -10°C (MPa⁻¹)",
-            "J'' 60°C (MPa⁻¹)",
-            "Slope (G*98°C-G*75°C)/ΔT",
-            "T (°C) G'' MAX",
-            "T (°C) G''/G*² MAX",
-            "T (°C) Tan D MAX",
-            "Tan -30°C",
-            "Tan -20°C",
-            "Tan -10°C",
-            "Tan 0°C",
-            "Tan 10°C",
-            "Tan 20°C",
-            "Tan 30°C",
-            "Tan 40°C",
-            "Tan 50°C",
-            "Tan 60°C",
-            "Tan 90°C",
-            "Tan 100°C",
-            "Tan MAX",
-            "Tan Elastomer (°C)",
-            "Temp (°C) G*=1.5MPa",
-            "Temp (°C) G*=3MPa",
-            "Temp (°C) G*=5MPa",
-            "Temp (°C) G*=10MPa",
-            "Temp (°C) G*=100MPa"
-        ]
+        cols       = [n.rsplit('.',1)[0] for n in sorted(processed)]
+        summary_df = pd.DataFrame(index=key_names, columns=cols)
+        thresholds = [1.5,3,5,10,100]
+        for name,df in processed.items():
+            mix        = name.rsplit('.',1)[0]
+            f          = raw_force_aggs[name]
+            v          = raw_val_aggs[name]
+            summary_df.at["Def % -20°C",      mix] = f.get(-20,   np.nan)
+            summary_df.at["Def % -10°C",      mix] = f.get(-10,   np.nan)
+            summary_df.at["Def % 10°C",       mix] = f.get( 10,   np.nan)
+            summary_df.at["Def % 30°C",       mix] = f.get( 30,   np.nan)
+            summary_df.at["Def % 60°C",       mix] = f.get( 60,   np.nan)
+            summary_df.at["Def % 100°C",      mix] = f.get(100,   np.nan)
+            summary_df.at["G'' 10°C (MPa)",   mix] = v.at[ 10,"G'' (Pa)"]*1e-6
+            summary_df.at["G'' 90°C (MPa)",   mix] = v.at[ 90,"G'' (Pa)"]*1e-6
+            summary_df.at["G'' MAX (MPa)",    mix] = df["G'' (Pa)"].max()*1e-6
+            for T in (-30,-20,-10,0,10,20,30,40,50,60,90,100):
+                summary_df.at[f"G* {T}°C (MPa)",mix] = v.at[T,"G* (Pa)"]*1e-6
+                summary_df.at[f"Tan {T}°C",       mix] = raw_val_aggs[name].at[T,"Tan Delta"]
+            summary_df.at["G\"/G*² -20°C",     mix] = v.at[-20,"G'' (Pa)"]/(v.at[-20,"G* (Pa)"]**2)
+            summary_df.at["G\"/G*² MAX",       mix] = df["G'' (Pa)"].max()/(df["G* (Pa)"].max()**2)
+            summary_df.at["Tan MAX",           mix] = df["Tan Delta"].max()
+            summary_df.at["Tan Elastomer (°C)",mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
+            summary_df.at["Slope (G*98°C-G*75°C)/ΔT",mix] = ((v.at[98,"G* (Pa)"]-v.at[75,"G* (Pa)"])*1e-6)/(98-75)
+            summary_df.at["T (°C) G'' MAX",    mix] = df.loc[df["G'' (Pa)"].idxmax(),"Temperature (°C)"]
+            ratio = df["G'' (Pa)"]/(df["G* (Pa)"]**2)
+            summary_df.at["T (°C) G''/G*² MAX",mix] = df.loc[ratio.idxmax(),"Temperature (°C)"]
+            summary_df.at["T (°C) Tan D MAX",  mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
+            
+            gstar_mp = df["G* (Pa)_smooth"] * 1e-6
+            tol      = 2.0
+            for thr in thresholds:
+                # mask rows whose G* is within ±2 MPa of thr
+                mask = (gstar_mp >= thr - tol) & (gstar_mp <= thr + tol)
+                if mask.any():
+                    # take the first matching temperature
+                    temp_val = df.loc[mask, "Temperature (°C)"].iloc[0]
+                else:
+                    temp_val = np.nan
+                summary_df.at[f"Temp (°C) G*={thr}MPa", mix] = temp_val
 
-    # file names as columns, without extension
-    cols = [name.rsplit('.',1)[0] for name in sorted(processed.keys())]
 
-    # assemble empty DataFrame
-    summary_df = pd.DataFrame(index=key_names, columns=cols)
-    st.dataframe(summary_df, use_container_width=True, height=600)
+
+                        
+            st.dataframe(summary_df, use_container_width=True, height=600)
+    else:
+        st.info("Key values for Strain Sweep coming soon.")
+
 
 
 
