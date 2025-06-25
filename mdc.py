@@ -206,7 +206,7 @@ with tab_graph:
             ax.set_xscale('log')
             if metric == "Tan Delta":
                 ax.set_xticks(ticks + [10])
-                ax.set_xlim(ticks[0], 10)
+                ax.set_xlim(ticks[0], ticks[-1])
             else:
                 ax.set_xticks(ticks)
                 ax.set_xlim(ticks[0], ticks[-1])
@@ -221,7 +221,11 @@ with tab_graph:
             ax.set_title(f"{y_label} vs {x_axis} ({phase})")
         else:
             ax.set_title(f"{y_label} vs {x_axis}")
-        ax.legend(fontsize="small", loc="best")
+        
+        if mode == "Strain Sweep":
+            ax.legend(fontsize="small", loc="lower right")
+        elif mode == "Temperature Sweep":
+            ax.legend(fontsize="small", loc="upper right")
         cols[i%2].pyplot(fig, use_container_width=True)
 
 
@@ -266,28 +270,98 @@ with tab_key:
             summary_df.at["G\"/G*² MAX",       mix] = df["G'' (Pa)"].max()/(df["G* (Pa)"].max()**2)
             summary_df.at["Tan MAX",           mix] = df["Tan Delta"].max()
             summary_df.at["Tan Elastomer (°C)",mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
-            summary_df.at["Slope (G*98°C-G*75°C)/ΔT",mix] = ((v.at[98,"G* (Pa)"]-v.at[75,"G* (Pa)"])*1e-6)/(98-75)
+            summary_df.at["Slope (G*98°C-G*75°C)/ΔT",mix] = ((v.at[98,"G* (Pa)"]-v.at[75,"G* (Pa)"])*1e-6)/23
             summary_df.at["T (°C) G'' MAX",    mix] = df.loc[df["G'' (Pa)"].idxmax(),"Temperature (°C)"]
             ratio = df["G'' (Pa)"]/(df["G* (Pa)"]**2)
             summary_df.at["T (°C) G''/G*² MAX",mix] = df.loc[ratio.idxmax(),"Temperature (°C)"]
             summary_df.at["T (°C) Tan D MAX",  mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
-            
             gstar_mp = df["G* (Pa)_smooth"] * 1e-6
             tol      = 2.0
             for thr in thresholds:
-                # mask rows whose G* is within ±2 MPa of thr
-                mask = (gstar_mp >= thr - tol) & (gstar_mp <= thr + tol)
-                if mask.any():
-                    # take the first matching temperature
-                    temp_val = df.loc[mask, "Temperature (°C)"].iloc[0]
-                else:
-                    temp_val = np.nan
+                mask    = (gstar_mp >= thr - tol) & (gstar_mp <= thr + tol)
+                temp_val= df.loc[mask, "Temperature (°C)"].iloc[0] if mask.any() else np.nan
                 summary_df.at[f"Temp (°C) G*={thr}MPa", mix] = temp_val
 
+        st.dataframe(summary_df, use_container_width=True, height=600)
+    
+
+    elif mode=="Strain Sweep":
+        key_names=[
+            "DEFORMATION G\" MAX (%) Go","DEFORMATION G\" MAX (%) Return","DEFORMATION Tg MAX Go (%)","DEFORMATION Tg MAX Return (%)",
+            "G' 10% Return (MPa)","G' 35% Return (MPa)",
+            "G' DEF MIN Go (%)","G' DEF MIN Return (%)","G' DEF MAX Go (%)","G' DEF MAX Return (%)",
+            "G'' 10% Go (MPa)","G'' 10% Return (MPa)","G'' 20% Return (MPa)","G'' 35% Return (MPa)",
+            "G'' MAX Return (MPa)","G'' DEF MIN Return (MPa)",
+            "G* 0.2% Go (MPa)","G* 0.2% Return (MPa)","G* 0.6% Return (MPa)",
+            "G* 1% Go (MPa)","G* 1% Return (MPa)","G* 2% Go (MPa)","G* 2% Return (MPa)",
+            "G* 10% Go (MPa)","G* 10% Return (MPa)","G* 15% Go (MPa)","G* 15% Return (MPa)",
+            "G* 20% Go (MPa)","G* 20% Return (MPa)","G* 25% Go (MPa)","G* 25% Return (MPa)",
+            "G* 50% Go (MPa)","G* 50% Return (MPa)","G* 97% Go (MPa)","G* 97% Return (MPa)",
+            "G* DEF MIN Go (MPa)","G* DEF MIN Return (MPa)","G* DEF MAX Go (MPa)","G* DEF MAX Return (MPa)",
+            "Tan D - 0.1% Return","Tan D - 1% Go","Tan D - 1% Return","Tan D - 10% Go","Tan D - 10% Return",
+            "Tan D - 20% Go","Tan D - 20% Return","Tan D MAX Return","Tan D DEF MAX Return","Tan D DEF MIN Return","Tan D MAX Go"
+        ]
+        cols=[n.rsplit('.',1)[0] for n in sorted(processed)]
+        summary_df=pd.DataFrame(index=key_names,columns=cols)
+        for name,df in processed.items():
+            mix=name.rsplit('.',1)[0]
+            peak=df["dyn Str"].idxmax();df_go,df_ret=df.loc[:peak],df.loc[peak:]
+            i=df_go["G'' (Pa)"].idxmax();      summary_df.at["DEFORMATION G\" MAX (%) Go",mix]=df_go.loc[i,"dyn Str"]*100
+            i=df_ret["G'' (Pa)"].idxmax();     summary_df.at["DEFORMATION G\" MAX (%) Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            i=df_go["Tan Delta"].idxmax();     summary_df.at["DEFORMATION Tg MAX Go (%)",mix]=df_go.loc[i,"dyn Str"]*100
+            i=df_ret["Tan Delta"].idxmax();    summary_df.at["DEFORMATION Tg MAX Return (%)",mix]=df_ret.loc[i,"dyn Str"]*100
+            # G' value where dynamic Strain is closest to 0.10 and 0.35
+            i=(df_ret["dyn Str"]-0.10).abs().idxmin(); summary_df.at["G' 10% Return (MPa)",mix]=df_ret.loc[i,"G' (Pa)"]*1e-6
+            i=(df_ret["dyn Str"]-0.35).abs().idxmin(); summary_df.at["G' 35% Return (MPa)",mix]=df_ret.loc[i,"G' (Pa)"]*1e-6
+            # dynamic Strain at G' minimum and maximum
+            i=df_go["G' (Pa)"].idxmin();       summary_df.at["G' DEF MIN Go (%)",mix]=df_go.loc[i,"dyn Str"]*100
+            i=df_ret["G' (Pa)"].idxmin();      summary_df.at["G' DEF MIN Return (%)",mix]=df_ret.loc[i,"dyn Str"]*100
+            i=df_go["G' (Pa)"].idxmax();       summary_df.at["G' DEF MAX Go (%)",mix]=df_go.loc[i,"dyn Str"]*100
+            i=df_ret["G' (Pa)"].idxmax();      summary_df.at["G' DEF MAX Return (%)",mix]=df_ret.loc[i,"dyn Str"]*100
+            # G'' value where dynamic Strain closest to 0.10, 0.20 and 0.35
+            i=(df_go["dyn Str"]-0.10).abs().idxmin();  summary_df.at["G'' 10% Go (MPa)",mix]=df_go.loc[i,"G'' (Pa)"]*1e-6
+            i=(df_ret["dyn Str"]-0.10).abs().idxmin(); summary_df.at["G'' 10% Return (MPa)",mix]=df_ret.loc[i,"G'' (Pa)"]*1e-6
+            i=(df_ret["dyn Str"]-0.20).abs().idxmin(); summary_df.at["G'' 20% Return (MPa)",mix]=df_ret.loc[i,"G'' (Pa)"]*1e-6
+            i=(df_ret["dyn Str"]-0.35).abs().idxmin(); summary_df.at["G'' 35% Return (MPa)",mix]=df_ret.loc[i,"G'' (Pa)"]*1e-6
+            summary_df.at["G'' MAX Return (MPa)",mix]=df_ret["G'' (Pa)"].max()*1e-6
+            # dynamic Strain at G'' minimum
+            i=df_ret["G'' (Pa)"].idxmin();      summary_df.at["G'' DEF MIN Return (MPa)",mix]=df_ret.loc[i,"dyn Str"]
+            # G* values at specified strains
+            pairs=[(0.002,"G* 0.2% Go (MPa)",df_go),(0.002,"G* 0.2% Return (MPa)",df_ret),
+                (0.006,"G* 0.6% Return (MPa)",df_ret),(0.01,"G* 1% Go (MPa)",df_go),
+                (0.01,"G* 1% Return (MPa)",df_ret),(0.02,"G* 2% Go (MPa)",df_go),
+                (0.02,"G* 2% Return (MPa)",df_ret),(0.1,"G* 10% Go (MPa)",df_go),
+                (0.1,"G* 10% Return (MPa)",df_ret),(0.15,"G* 15% Go (MPa)",df_go),
+                (0.15,"G* 15% Return (MPa)",df_ret),(0.2,"G* 20% Go (MPa)",df_go),
+                (0.2,"G* 20% Return (MPa)",df_ret),(0.25,"G* 25% Go (MPa)",df_go),
+                (0.25,"G* 25% Return (MPa)",df_ret),(0.5,"G* 50% Go (MPa)",df_go),
+                (0.5,"G* 50% Return (MPa)",df_ret),(0.97,"G* 97% Go (MPa)",df_go),
+                (0.97,"G* 97% Return (MPa)",df_ret)]
+            for T,label,phase_df in pairs:
+                if phase_df.empty: summary_df.at[label,mix]="N/A"
+                else:
+                    idx=(phase_df["dyn Str"]-T).abs().idxmin()
+                    summary_df.at[label,mix]=phase_df.loc[idx,"G* (Pa)"]*1e-6
+            # G* def min/max
+            summary_df.at["G* DEF MIN Go (MPa)",mix]=df_go["G* (Pa)"].min()*1e-6 if not df_go.empty else "N/A"
+            summary_df.at["G* DEF MIN Return (MPa)",mix]=df_ret["G* (Pa)"].min()*1e-6 if not df_ret.empty else "N/A"
+            summary_df.at["G* DEF MAX Go (MPa)",mix]=df_go["G* (Pa)"].max()*1e-6 if not df_go.empty else "N/A"
+            summary_df.at["G* DEF MAX Return (MPa)",mix]=df_ret["G* (Pa)"].max()*1e-6 if not df_ret.empty else "N/A"
+            # Tan D at specified strains and extremes
+            i=(df_ret["dyn Str"]-0.001).abs().idxmin(); summary_df.at["Tan D - 0.1% Return",mix]=df_ret.loc[i,"Tan Delta"]
+            i=(df_go["dyn Str"]-0.01).abs().idxmin();  summary_df.at["Tan D - 1% Go",mix]=df_go.loc[i,"Tan Delta"]
+            i=(df_ret["dyn Str"]-0.01).abs().idxmin(); summary_df.at["Tan D - 1% Return",mix]=df_ret.loc[i,"Tan Delta"]
+            i=(df_go["dyn Str"]-0.1).abs().idxmin();   summary_df.at["Tan D - 10% Go",mix]=df_go.loc[i,"Tan Delta"]
+            i=(df_ret["dyn Str"]-0.1).abs().idxmin();  summary_df.at["Tan D - 10% Return",mix]=df_ret.loc[i,"Tan Delta"]
+            i=(df_go["dyn Str"]-0.2).abs().idxmin();   summary_df.at["Tan D - 20% Go",mix]=df_go.loc[i,"Tan Delta"]
+            i=(df_ret["dyn Str"]-0.2).abs().idxmin();  summary_df.at["Tan D - 20% Return",mix]=df_ret.loc[i,"Tan Delta"]
+            summary_df.at["Tan D MAX Return",mix]=df_ret["Tan Delta"].max()
+            i=df_ret["Tan Delta"].idxmax();         summary_df.at["Tan D DEF MAX Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            i=df_ret["Tan Delta"].idxmin();         summary_df.at["Tan D DEF MIN Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            summary_df.at["Tan D MAX Go",mix]=df_go["Tan Delta"].max()
+        st.dataframe(summary_df,use_container_width=True)
 
 
-                        
-            st.dataframe(summary_df, use_container_width=True, height=600)
     else:
         st.info("Key values for Strain Sweep coming soon.")
 
