@@ -473,7 +473,7 @@ with tab_key:
 
             # 4) Offer one Download button + show the table
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf) as writer:
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 summary_df.to_excel(writer, sheet_name="Key Values")
             buf.seek(0)
             c1, c2 = st.columns([9,1])
