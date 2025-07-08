@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 import re
+import io
+from xlsxwriter import Workbook
 
 
 
@@ -63,17 +65,20 @@ def clean_strain_sweep(buffer):
 
 
 
-
 @st.cache_data
 def clean_temp_sweep(buffer):
+    # 1) read & decode whole file
     raw = buffer.readlines() if hasattr(buffer, "readlines") else open(buffer, 'rb').readlines()
     lines = [
         L.decode('latin-1', errors='replace') if isinstance(L, (bytes, bytearray)) else L
         for L in raw
     ]
 
-    new_cols = ['dyn F (N)', 'Freq (Hz)', 'Time (s)', "G'", "G''", 'Tan Delta', 'Temperature (°C)', 'dyn Str', 'Time1']
-
+    # 2) pull out data rows
+    new_cols = [
+        'dyn F (N)', 'Freq (Hz)', 'Time (s)', "G'", "G''", 'Tan Delta',
+        'Temperature (°C)', 'dyn Str', 'Time1'
+    ]
     cleaned = []
     blank_count = 0
     for ln in lines[16:]:
@@ -84,51 +89,59 @@ def clean_temp_sweep(buffer):
         else:
             blank_count = 0
             cleaned.append(ln.strip())
-
     rows = [ln.lstrip(';').split(';') for ln in cleaned]
     df = pd.DataFrame(rows, columns=new_cols)
 
-    x_col  = 'Temperature (°C)'
-    metrics = ["G'", "G''", "Tan Delta"]
+    # 3) split into mini-tests by dyn F
+    mini_tests = {}
+    for val in df['dyn F (N)'].unique():
+        mini_tests[float(val)] = df[df['dyn F (N)'] == val].copy()
 
-    df[x_col] = pd.to_numeric(df[x_col], errors='coerce')
-    for m in metrics:
-        df[m] = pd.to_numeric(df[m], errors='coerce')
-        df[f"{m}_smooth"] = df[m].rolling(window=2, center=True).mean()
+    # 4) for each mini-test: convert, compute G*, smooth & fill edges
+    window = 5
+    for f, sub in mini_tests.items():
+        sub['Temperature (°C)'] = pd.to_numeric(sub['Temperature (°C)'], errors='coerce')
+        for m in ["G'", "G''", "Tan Delta"]:
+            sub[m] = pd.to_numeric(sub[m], errors='coerce')
+        sub["G*"] = np.sqrt(sub["G'"]**2 + sub["G''"]**2)
 
-    # compute G* = sqrt(G'^2 + G''^2) and then smooth it
-    gstar = np.sqrt(df["G'"]**2 + df["G''"]**2)
-    df.insert(loc=5, column="G*", value=gstar)
-    df["G*_smooth"] = df["G*"].rolling(window=2, center=True).mean()
+        for col in ["G'", "G''", "Tan Delta", "G*"]:
+            sm_col = f"{col}_smooth"
+            sub[sm_col] = sub[col].rolling(window=window, center=True).mean()
 
-    return df
+            # fill leading NaNs with raw
+            first = sub[sm_col].first_valid_index()
+            if first is not None and first > 0:
+                sub.loc[:first-1, sm_col] = sub.loc[:first-1, col]
+
+            # fill trailing NaNs with raw
+            last = sub[sm_col].last_valid_index()
+            if last is not None and last < len(sub)-1:
+                sub.loc[last+1:, sm_col] = sub.loc[last+1:, col]
+
+        mini_tests[f] = sub
+
+    return mini_tests
+
 
 
 @st.cache_data
 def aggregate_by_degree(df: pd.DataFrame, degree_col: str, smooth_cols: list[str]) -> pd.DataFrame:
-    # make a copy and round the degree column to ints
     df_ = df.copy()
     df_['deg'] = df_[degree_col].round().astype(int)
     # group by that integer degree, average all the smoothed metrics
-    agg = (
-        df_
-        .groupby('deg')[smooth_cols]
-        .mean()
-        .reset_index()
-        .rename(columns={'deg': degree_col})
-    )
+    agg = (df_.groupby('deg')[smooth_cols].mean().reset_index().rename(columns={'deg': degree_col}))
     return agg
 
 
-# ——— Streamlit UI ———
+# ——— Streamlit  ———
 st.set_page_config(layout="wide")
 st.title("MDC Post-Processing Tool")
 
 mode = st.selectbox("Choose sweep type:", ["Strain Sweep", "Temperature Sweep"])
 
-uploaded = st.file_uploader("Upload one or more files",  type=['asc'], accept_multiple_files=True,
-    key="uploader_strain" if mode=="Strain Sweep" else "uploader_temp")
-
+uploaded = st.file_uploader("Upload files",  type=['asc'], accept_multiple_files=True, key="uploader_strain" if mode=="Strain Sweep" else "uploader_temp")
+ 
 if not uploaded:
     st.info("📂 Please upload at least one file to continue.")
     st.stop()
@@ -143,9 +156,27 @@ if not processed:
     st.stop()
 
 if mode=="Temperature Sweep":
-    raw_force_aggs = {name: df.assign(deg=df['Temperature (°C)'].round().astype(int), dynF=pd.to_numeric(df['dyn F (N)'],errors='coerce')).groupby('deg')['dynF'].mean() for name,df in processed.items()}
-    raw_val_aggs   = {name: df.assign(deg=df['Temperature (°C)'].round().astype(int)).groupby('deg')[["G''","G*","Tan Delta"]].mean() for name,df in processed.items()}
+    # for each file (name) and each mini‐test (dynF → df):
+    raw_force_aggs = {
+        name: {
+            dynF: (
+                df.assign(deg=df['Temperature (°C)'].round().astype(int), dynF_num=pd.to_numeric(df['dyn F (N)'], errors='coerce'))
+                .groupby('deg')['dynF_num'].mean()
+            )
+            for dynF, df in tests.items()
+        }
+        for name, tests in processed.items()
+    }
 
+    raw_val_aggs = {
+        name: {
+            dynF: (
+                df.assign(deg=df['Temperature (°C)'].round().astype(int)).groupby('deg')[["G''","G*","Tan Delta"]].mean()
+            )
+            for dynF, df in tests.items()
+        }
+        for name, tests in processed.items()
+    }
 
 
 tab_graph, tab_key, tab_data = st.tabs(["Graph Interface","Key Values","Data Interface"])
@@ -161,7 +192,7 @@ with tab_graph:
         with col1:
             phase = st.radio("Phase", ["Both","Go","Return"], horizontal=True)
         with col2:
-            grid_on = st.radio("Grid lines:", ["On","Off"], horizontal=True) == "On"
+            grid_on = st.radio("Grid lines", ["On","Off"], horizontal=True) == "On"
 
         st.markdown("**Select mixes to plot**")
         mixes = []
@@ -200,7 +231,11 @@ with tab_graph:
                     ticks = [10**e for e in range(min_e, max_e+1)]
 
                     ax.set_xscale('log'); ax.set_xticks(ticks); ax.set_xlim(ticks[0], ticks[-1]); ax.set_xticklabels([f"{t:g}" for t in ticks])
-                    ax.set_ylim(bottom=0); ax.margins(y=0); ax.grid(grid_on); ax.set_xlabel("Strain [%]")
+                    y_min, y_max = y.min(), y.max()
+                    padding = 0.3 * (y_max - y_min)
+                    ax.set_ylim(y_min - padding, y_max + padding)
+
+                    ax.grid(grid_on); ax.set_xlabel("Strain [%]")
                     unit = " [MPa]" if metric in ("G'", "G''", "G*") else ""
                     ax.set_ylabel(metric + unit)
                     ax.set_title(title)
@@ -208,7 +243,7 @@ with tab_graph:
                     pc.pyplot(fig, use_container_width=True)
 
 
-            
+
     elif mode == "Temperature Sweep":
         st.subheader("Temperature Sweep Graphs")
         grid_on = st.radio("Grid lines:", ["On","Off"], horizontal=True) == "On"
@@ -223,42 +258,56 @@ with tab_graph:
             st.info("Select at least one mix to see the panels.")
             st.stop()
 
+        # grab & sort the three dyn-F values (as floats)
+        dynFs = sorted(processed[mixes[0]].keys())
+
         metrics = ["G'", "G''", "G*", "Tan Delta"]
-        for row in (metrics[:2], metrics[2:]):
-            plot_cols = st.columns(2, gap="large")
-            for metric, pc in zip(row, plot_cols):
-                with pc:
-                    title = st.text_input(f"**Title for {metric}**", value=f"{metric} vs Temperature (°C)", key=f"title_temp_{metric}")
+        for metric in metrics:
+            st.markdown(f"##### {metric} vs Temperature")
+            cols = st.columns(len(dynFs), gap="large")
+            for dynF, col in zip(dynFs, cols):
+                with col:
+                    # clean label (no markdown) so the '*' won’t mangle
+                    label = f"{metric} vs Temperature at {int(dynF)} N"
+                    key   = f"title_{metric}_{int(dynF)}"
+                    title = st.text_input(label, value=label, key=key)
+
                     fig, ax = plt.subplots()
                     for name in mixes:
-                        df = processed[name].copy()
-                        deg = df["Temperature (°C)"].round().astype(int)
-                        y = df[f"{metric}_smooth"] if metric != "G*" else df["G*_smooth"]
-                        agg = (
-                            pd.DataFrame({ "Temperature (°C)": deg, "y": y })
-                            .groupby("Temperature (°C)")["y"]
-                            .mean()
-                            .reset_index()
-                        )
-                        agg[f"{metric}_agg_smooth"] = agg["y"].rolling(window=20, center=True).mean()
-                        x_vals = agg["Temperature (°C)"]
-                        y_vals = agg[f"{metric}_agg_smooth"]
-                        if metric in ("G'", "G''", "G*"):
-                            y_vals *= 1e-6
-                        ax.plot(x_vals, y_vals,
-                                label=name.rsplit('.',1)[0],
-                                linewidth=1.5)
+                        sub = processed[name][dynF]  # already a copy
+                        # aggregate by integer °C
+                        deg = sub['Temperature (°C)'].round().astype(int)
+                        col_raw = f"{metric}_smooth" if metric!="G*" else "G*_smooth"
+                        agg = (sub.assign(deg=deg)
+                                .groupby('deg')[col_raw]
+                                .mean()
+                                .reset_index()
+                                .rename(columns={'deg': 'Temperature (°C)', col_raw:'y'}))
+                        # second smooth + edge‐fill
+                        agg['y_smooth'] = agg['y'].rolling(window=20, center=True).mean()
+                        first = agg['y_smooth'].first_valid_index()
+                        if first and first>0:     agg.loc[:first-1,'y_smooth'] = agg.loc[:first-1,'y']
+                        last  = agg['y_smooth'].last_valid_index()
+                        if last and last < len(agg)-1: agg.loc[last+1:,'y_smooth'] = agg.loc[last+1:,'y']
 
-                    ax.set_xlim(df["Temperature (°C)"].min(), df["Temperature (°C)"].max())
+                        x = agg['Temperature (°C)']
+                        y = agg['y_smooth']
+                        if metric in ("G'","G''","G*"):
+                            y = y * 1e-6
+
+                        ax.plot(x, y, label=name.rsplit('.',1)[0], linewidth=1.5)
+
+                    ax.set_xlim(agg['Temperature (°C)'].min(), agg['Temperature (°C)'].max())
                     ax.set_ylim(bottom=0)
                     ax.margins(y=0)
                     ax.grid(grid_on)
                     ax.set_xlabel("Temperature (°C)")
-                    unit = " [MPa]" if metric in ("G'", "G''", "G*") else ""
+                    unit = " [MPa]" if metric in ("G'","G''","G*") else ""
                     ax.set_ylabel(metric + unit)
                     ax.set_title(title)
                     ax.legend(fontsize="small", loc="upper right")
-                    pc.pyplot(fig, use_container_width=True)    
+
+                    col.pyplot(fig, use_container_width=True)
 
 
 
@@ -266,58 +315,8 @@ with tab_graph:
 # — Key Values Interface —
 with tab_key:
     st.subheader("Key Values")
-    if mode=="Temperature Sweep":
-        key_names = [
-            "Def % -20°C","Def % -10°C","Def % 10°C","Def % 30°C","Def % 60°C","Def % 100°C",
-            "G'' 10°C (MPa)","G'' 90°C (MPa)","G'' MAX (MPa)",
-            "G* -30°C (MPa)","G* -20°C (MPa)","G* -10°C (MPa)","G* 0°C (MPa)","G* 10°C (MPa)",
-            "G* 20°C (MPa)","G* 30°C (MPa)","G* 40°C (MPa)","G* 50°C (MPa)","G* 60°C (MPa)",
-            "G* 90°C (MPa)","G* 100°C (MPa)","G\"/G*² -20°C","G\"/G*² MAX",
-            "Slope (G*98°C-G*75°C)/ΔT","T (°C) G'' MAX","T (°C) G''/G*² MAX","T (°C) Tan D MAX",
-            "Tan -30°C","Tan -20°C","Tan -10°C","Tan 0°C","Tan 10°C","Tan 20°C",
-            "Tan 30°C","Tan 40°C","Tan 50°C","Tan 60°C","Tan 90°C","Tan 100°C",
-            "Tan MAX","Tan Elastomer (°C)",
-            "Temp (°C) G*=1.5MPa","Temp (°C) G*=3MPa","Temp (°C) G*=5MPa","Temp (°C) G*=10MPa","Temp (°C) G*=100MPa"
-        ]
-        cols       = [n.rsplit('.',1)[0] for n in sorted(processed)]
-        summary_df = pd.DataFrame(index=key_names, columns=cols)
-        thresholds = [1.5,3,5,10,100]
-        for name,df in processed.items():
-            mix        = name.rsplit('.',1)[0]
-            f          = raw_force_aggs[name]
-            v          = raw_val_aggs[name]
-            summary_df.at["Def % -20°C",      mix] = f.get(-20,   np.nan)
-            summary_df.at["Def % -10°C",      mix] = f.get(-10,   np.nan)
-            summary_df.at["Def % 10°C",       mix] = f.get( 10,   np.nan)
-            summary_df.at["Def % 30°C",       mix] = f.get( 30,   np.nan)
-            summary_df.at["Def % 60°C",       mix] = f.get( 60,   np.nan)
-            summary_df.at["Def % 100°C",      mix] = f.get(100,   np.nan)
-            summary_df.at["G'' 10°C (MPa)",   mix] = v.at[ 10,"G''"]*1e-6
-            summary_df.at["G'' 90°C (MPa)",   mix] = v.at[ 90,"G''"]*1e-6
-            summary_df.at["G'' MAX (MPa)",    mix] = df["G''"].max()*1e-6
-            for T in (-30,-20,-10,0,10,20,30,40,50,60,90,100):
-                summary_df.at[f"G* {T}°C (MPa)",mix] = v.at[T,"G*"]*1e-6
-                summary_df.at[f"Tan {T}°C",       mix] = raw_val_aggs[name].at[T,"Tan Delta"]
-            summary_df.at["G\"/G*² -20°C",     mix] = v.at[-20,"G''"]/(v.at[-20,"G*"]**2)
-            summary_df.at["G\"/G*² MAX",       mix] = df["G''"].max()/(df["G*"].max()**2)
-            summary_df.at["Tan MAX",           mix] = df["Tan Delta"].max()
-            summary_df.at["Tan Elastomer (°C)",mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
-            summary_df.at["Slope (G*98°C-G*75°C)/ΔT",mix] = ((v.at[98,"G*"]-v.at[75,"G*"])*1e-6)/23
-            summary_df.at["T (°C) G'' MAX",    mix] = df.loc[df["G''"].idxmax(),"Temperature (°C)"]
-            ratio = df["G''"]/(df["G*"]**2)
-            summary_df.at["T (°C) G''/G*² MAX",mix] = df.loc[ratio.idxmax(),"Temperature (°C)"]
-            summary_df.at["T (°C) Tan D MAX",  mix] = df.loc[df["Tan Delta"].idxmax(),"Temperature (°C)"]
-            gstar_mp = df["G*_smooth"] * 1e-6
-            tol      = 2.0
-            for thr in thresholds:
-                mask    = (gstar_mp >= thr - tol) & (gstar_mp <= thr + tol)
-                temp_val= df.loc[mask, "Temperature (°C)"].iloc[0] if mask.any() else np.nan
-                summary_df.at[f"Temp (°C) G*={thr}MPa", mix] = temp_val
 
-        st.dataframe(summary_df, use_container_width=True, height=600)
-    
-
-    elif mode=="Strain Sweep":
+    if mode=="Strain Sweep":
         key_names=[
             "DEFORMATION G\" MAX (%) Go","DEFORMATION G\" MAX (%) Return",
             "G' 10% Return (MPa)","G' 35% Return (MPa)",
@@ -338,8 +337,8 @@ with tab_key:
         for name,df in processed.items():
             mix=name.rsplit('.',1)[0]
             peak=df["dyn Str"].idxmax();df_go,df_ret=df.loc[:peak],df.loc[peak:]
-            i=df_go["G''"].idxmax();      summary_df.at["DEFORMATION G\" MAX (%) Go",mix]=df_go.loc[i,"dyn Str"]*100
-            i=df_ret["G''"].idxmax();     summary_df.at["DEFORMATION G\" MAX (%) Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            # i=df_go["G''"].idxmax();      summary_df.at["DEFORMATION G\" MAX (%) Go",mix]=df_go.loc[i,"dyn Str"]*100
+            # i=df_ret["G''"].idxmax();     summary_df.at["DEFORMATION G\" MAX (%) Return",mix]=df_ret.loc[i,"dyn Str"]*100
             # G' value where dynamic Strain is closest to 0.10 and 0.35
             i=(df_ret["dyn Str"]-0.05).abs().idxmin(); summary_df.at["G' 10% Return (MPa)",mix]=df_ret.loc[i,"G'"]*1e-6
             i=(df_ret["dyn Str"]-0.175).abs().idxmin(); summary_df.at["G' 35% Return (MPa)",mix]=df_ret.loc[i,"G'"]*1e-6
@@ -355,7 +354,7 @@ with tab_key:
             i=(df_ret["dyn Str"]-0.175).abs().idxmin(); summary_df.at["G'' 35% Return (MPa)",mix]=df_ret.loc[i,"G''"]*1e-6
             summary_df.at["G'' MAX Return (MPa)",mix]=df_ret["G''"].max()*1e-6
             # dynamic Strain at G'' minimum
-            i=df_ret["G''"].idxmin();      summary_df.at["G'' DEF MIN Return (MPa)",mix]=df_ret.loc[i,"dyn Str"]
+            # i=df_ret["G''"].idxmin();      summary_df.at["G'' DEF MIN Return (MPa)",mix]=df_ret.loc[i,"dyn Str"]
             # G* values at specified strains
             pairs=[(0.001,"G* 0.2% Go (MPa)",df_go),(0.001,"G* 0.2% Return (MPa)",df_ret),
                 (0.003,"G* 0.6% Return (MPa)",df_ret),(0.005,"G* 1% Go (MPa)",df_go),
@@ -373,10 +372,10 @@ with tab_key:
                     idx=(phase_df["dyn Str"]-T).abs().idxmin()
                     summary_df.at[label,mix]=phase_df.loc[idx,"G*"]*1e-6
             # G* def min/max
-            summary_df.at["G* DEF MIN Go (MPa)",mix]=df_go["G*"].min()*1e-6 if not df_go.empty else "N/A"
-            summary_df.at["G* DEF MIN Return (MPa)",mix]=df_ret["G*"].min()*1e-6 if not df_ret.empty else "N/A"
-            summary_df.at["G* DEF MAX Go (MPa)",mix]=df_go["G*"].max()*1e-6 if not df_go.empty else "N/A"
-            summary_df.at["G* DEF MAX Return (MPa)",mix]=df_ret["G*"].max()*1e-6 if not df_ret.empty else "N/A"
+            # summary_df.at["G* DEF MIN Go (MPa)",mix]=df_go["G*"].min()*1e-6 if not df_go.empty else "N/A"
+            # summary_df.at["G* DEF MIN Return (MPa)",mix]=df_ret["G*"].min()*1e-6 if not df_ret.empty else "N/A"
+            # summary_df.at["G* DEF MAX Go (MPa)",mix]=df_go["G*"].max()*1e-6 if not df_go.empty else "N/A"
+            # summary_df.at["G* DEF MAX Return (MPa)",mix]=df_ret["G*"].max()*1e-6 if not df_ret.empty else "N/A"
             # Tan D at specified strains and extremes
             i=(df_ret["dyn Str"]-0.0005).abs().idxmin(); summary_df.at["Tan D - 0.1% Return",mix]=df_ret.loc[i,"Tan Delta"]
             i=(df_go["dyn Str"]-0.005).abs().idxmin();  summary_df.at["Tan D - 1% Go",mix]=df_go.loc[i,"Tan Delta"]
@@ -386,14 +385,106 @@ with tab_key:
             i=(df_go["dyn Str"]-0.1).abs().idxmin();   summary_df.at["Tan D - 20% Go",mix]=df_go.loc[i,"Tan Delta"]
             i=(df_ret["dyn Str"]-0.1).abs().idxmin();  summary_df.at["Tan D - 20% Return",mix]=df_ret.loc[i,"Tan Delta"]
             summary_df.at["Tan D MAX Return",mix]=df_ret["Tan Delta"].max()
-            i=df_ret["Tan Delta"].idxmax();         summary_df.at["Tan D DEF MAX Return",mix]=df_ret.loc[i,"dyn Str"]*100
-            i=df_ret["Tan Delta"].idxmin();         summary_df.at["Tan D DEF MIN Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            # i=df_ret["Tan Delta"].idxmax();         summary_df.at["Tan D DEF MAX Return",mix]=df_ret.loc[i,"dyn Str"]*100
+            # i=df_ret["Tan Delta"].idxmin();         summary_df.at["Tan D DEF MIN Return",mix]=df_ret.loc[i,"dyn Str"]*100
             summary_df.at["Tan D MAX Go",mix]=df_go["Tan Delta"].max()
         st.dataframe(summary_df,use_container_width=True)
 
 
-    else:
-        st.info("Key values for Strain Sweep coming soon.")
+
+    elif mode=="Temperature Sweep":
+
+        # 1) The rows we want in every mini‐test table:
+        key_names = [
+            "G'' 10°C (MPa)","G'' 90°C (MPa)","G'' MAX (MPa)",
+            "G* -30°C (MPa)","G* -20°C (MPa)","G* -10°C (MPa)","G* 0°C (MPa)","G* 10°C (MPa)",
+            "G* 20°C (MPa)","G* 30°C (MPa)","G* 40°C (MPa)","G* 50°C (MPa)","G* 60°C (MPa)",
+            "G* 90°C (MPa)","G* 100°C (MPa)","G\"/G*² -20°C","G\"/G*² MAX",
+            "Slope (G*98°C-G*75°C)/ΔT","T (°C) G'' MAX","T (°C) G''/G*² MAX","T (°C) Tan D MAX",
+            "Tan -30°C","Tan -20°C","Tan -10°C","Tan 0°C","Tan 10°C","Tan 20°C",
+            "Tan 30°C","Tan 40°C","Tan 50°C","Tan 60°C","Tan 90°C","Tan 100°C",
+            "Tan MAX","Tan Elastomer (°C)",
+            "Temp (°C) G*=1.5MPa","Temp (°C) G*=3MPa","Temp (°C) G*=5MPa",
+            "Temp (°C) G*=10MPa","Temp (°C) G*=100MPa"
+        ]
+
+        # 2) Gather ALL dyn F values across mixes:
+        all_dynFs = sorted({df_key for mix_dict in processed.values() for df_key in mix_dict.keys()}, key=float)
+
+        # 3) For each mini‐test (dyn F), build one DataFrame whose columns are the mixes:
+        for dynF in all_dynFs:
+            
+            # one column per mix
+            mix_names = [name.rsplit('.',1)[0] for name in sorted(processed)]
+            summary_df = pd.DataFrame(index=key_names, columns=mix_names)
+
+            for full_name, mix_dict in processed.items():
+                mix = full_name.rsplit('.',1)[0]
+                sub = mix_dict[dynF]  # this DataFrame for that mini‐test
+
+                # nearest‐temp picks for G'' @ 10 & 90
+                for T in (10, 90):
+                    idx = (sub["Temperature (°C)"] - T).abs().idxmin()
+                    summary_df.at[f"G'' {T}°C (MPa)", mix] = sub.at[idx, "G''"] * 1e-6
+                summary_df.at["G'' MAX (MPa)", mix] = sub["G''"].max() * 1e-6
+
+                # G* & Tan at each target temperature
+                temps = (-30,-20,-10,0,10,20,30,40,50,60,90,100)
+                for T in temps:
+                    idx = (sub["Temperature (°C)"] - T).abs().idxmin()
+                    summary_df.at[f"G* {T}°C (MPa)", mix] = sub.at[idx, "G*"] * 1e-6
+                    summary_df.at[f"Tan {T}°C",       mix] = sub.at[idx, "Tan Delta"]
+
+                # G''/G*² at -20°C and global max
+                idx20 = (sub["Temperature (°C)"] + 20).abs().idxmin()
+                val20 = sub.at[idx20, "G''"] / (sub.at[idx20, "G*"]**2)
+                summary_df.at["G\"/G*² -20°C", mix] = val20
+                summary_df.at["G\"/G*² MAX",     mix] = (sub["G''"]/(sub["G*"]**2)).max()
+
+                # slope (98 vs 75)
+                i98 = (sub["Temperature (°C)"] - 98).abs().idxmin()
+                i75 = (sub["Temperature (°C)"] - 75).abs().idxmin()
+                slope = ((sub.at[i98,"G*"] - sub.at[i75,"G*"]) * 1e-6) / (98 - 75)
+                summary_df.at["Slope (G*98°C-G*75°C)/ΔT", mix] = slope
+
+                # temperatures of maxima
+                iGpp = sub["G''"].idxmax()
+                summary_df.at["T (°C) G'' MAX", mix]     = sub.at[iGpp, "Temperature (°C)"]
+                ratio = sub["G''"]/(sub["G*"]**2)
+                iR   = ratio.idxmax()
+                summary_df.at["T (°C) G''/G*² MAX", mix] = sub.at[iR, "Temperature (°C)"]
+                iTan = sub["Tan Delta"].idxmax()
+                summary_df.at["T (°C) Tan D MAX", mix]   = sub.at[iTan, "Temperature (°C)"]
+
+                # Tan maxima & gel point
+                summary_df.at["Tan MAX", mix]            = sub["Tan Delta"].max()
+                iGel = sub["Tan Delta"].idxmax()
+                summary_df.at["Tan Elastomer (°C)", mix] = sub.at[iGel, "Temperature (°C)"]
+
+                # G* threshold matches ±5%
+                for thr in (1.5, 3, 5, 10, 100):
+                    tol = thr * 0.05
+                    diff = (sub["G*"]*1e-6 - thr).abs()
+                    matches = diff <= tol
+                    if matches.any():
+                        idx0 = matches.idxmax()
+                        summary_df.at[f"Temp (°C) G*={thr}MPa", mix] = sub.at[idx0, "Temperature (°C)"]
+                    else:
+                        summary_df.at[f"Temp (°C) G*={thr}MPa", mix] = np.nan
+
+            # 4) Offer one Download button + show the table
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+                summary_df.to_excel(writer, sheet_name="Key Values")
+            buf.seek(0)
+            c1, c2 = st.columns([9,1])
+            with c1:
+                label = f"{int(float(dynF))} N"
+                st.markdown(f"#### dyn F = {label}")
+            with c2:
+                st.download_button(label=f"Download {label}", data=buf, file_name=f"{label}_keys.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.dataframe(summary_df, use_container_width=True, height=400)
 
 
 
@@ -402,26 +493,43 @@ with tab_key:
 # — Data Interface —
 with tab_data:
     st.subheader("Raw Data Tables")
-    for name in mixes:
-        st.markdown(f"**{name.rsplit('.',1)[0]}**")
-        df = processed[name]
 
-        # drop the “_smooth” columns as before
-        drop_cols = [f"{m}_smooth" for m in ["G'","G''","Tan Delta","G*"]]
-        df_display = df.drop(columns=drop_cols).copy()
+    if mode == "Strain Sweep":
+        for name in mixes:
+            st.markdown(f"**{name.rsplit('.',1)[0]}**")
+            df = processed[name]
+            # drop all the '_smooth' cols
+            drop_cols = [f"{m}_smooth" for m in ["G'", "G''", "Tan Delta", "G*"]]
+            df_display = df.drop(columns=drop_cols).copy()
+            # find G-columns in Pa, convert → MPa
+            g_cols = [c for c in df_display.columns if "(Pa)" in c]
+            for c in g_cols:
+                df_display[c] = pd.to_numeric(df_display[c], errors='coerce') / 1e6
+            df_display = df_display.rename(columns={c: c.replace("(Pa)", "(MPa)") for c in g_cols})
+            st.dataframe(df_display, use_container_width=True)
+
+    elif mode == "Temperature Sweep":
+        for name in mixes:
+            mix = name.rsplit('.',1)[0]
+            st.markdown(f"### {mix}")
+            # processed[name] is now a dict dynF → mini-test DataFrame
+            for dynF, df in processed[name].items():
+                st.markdown(f"**dyn F = {dynF} N**")
+                # drop the smooth columns
+                drop_cols = [f"{m}_smooth" for m in ["G'", "G''", "Tan Delta", "G*"]]
+                df_disp = df.drop(columns=drop_cols).copy()
+                # convert G columns
+                for c in ["G'", "G''", "G*"]:
+                    if c in df_disp:
+                        df_disp[c] = pd.to_numeric(df_disp[c], errors='coerce') / 1e6
+                # rename to show units
+                df_disp = df_disp.rename(columns={"G'": "G' (MPa)", "G''": "G'' (MPa)", "G*": "G* (MPa)"})
+                # move "G* (MPa)" to index position 5
+                cols = list(df_disp.columns)
+                if "G* (MPa)" in cols:
+                    cols.insert(5, cols.pop(cols.index("G* (MPa)")))
+                    df_disp = df_disp[cols]
+                st.dataframe(df_disp, use_container_width=True, height=300)
 
 
-        # find all G-columns that end in “(Pa)”
-        g_cols = [c for c in df_display.columns if re.match(r"^G.*\(Pa\)$", c)]
-
-        # convert them to numeric and scale from Pa → MPa
-        for c in g_cols:
-            df_display[c] = pd.to_numeric(df_display[c], errors='coerce') / 1e6
-
-        # rename the headers from “(Pa)” → “(MPa)”
-        rename_map = {c: c.replace("(Pa)", "(MPa)") for c in g_cols}
-        df_display = df_display.rename(columns=rename_map)
-        # df_display["diff"] = np.sqrt(df_display["G* (MPa)"]**2 - df_display["G' (MPa)"]**2)
-
-        st.dataframe(df_display, use_container_width=True)
 
