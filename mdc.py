@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import re
 import io
-from xlsxwriter import Workbook
 
 
 
@@ -474,7 +473,7 @@ with tab_key:
 
             # 4) Offer one Download button + show the table
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            with pd.ExcelWriter(buf) as writer:
                 summary_df.to_excel(writer, sheet_name="Key Values")
             buf.seek(0)
             c1, c2 = st.columns([9,1])
