@@ -231,7 +231,7 @@ with tab_graph:
 
                     ax.set_xscale('log'); ax.set_xticks(ticks); ax.set_xlim(ticks[0], ticks[-1]); ax.set_xticklabels([f"{t:g}" for t in ticks])
                     y_min, y_max = y.min(), y.max()
-                    padding = 0.3 * (y_max - y_min)
+                    padding = 0.5 * (y_max - y_min)
                     ax.set_ylim(y_min - padding, y_max + padding)
 
                     ax.grid(grid_on); ax.set_xlabel("Strain [%]")
@@ -269,7 +269,7 @@ with tab_graph:
                     # clean label (no markdown) so the '*' won’t mangle
                     label = f"{metric} vs Temperature at {int(dynF)} N"
                     key   = f"title_{metric}_{int(dynF)}"
-                    title = st.text_input(label, value=label, key=key)
+                    title = st.text_input("Rename Plot Title below", value=label, key=key)
 
                     fig, ax = plt.subplots()
                     for name in mixes:
@@ -508,27 +508,68 @@ with tab_data:
             st.dataframe(df_display, use_container_width=True)
 
     elif mode == "Temperature Sweep":
-        for name in mixes:
-            mix = name.rsplit('.',1)[0]
-            st.markdown(f"### {mix}")
-            # processed[name] is now a dict dynF → mini-test DataFrame
-            for dynF, df in processed[name].items():
-                st.markdown(f"**dyn F = {dynF} N**")
-                # drop the smooth columns
-                drop_cols = [f"{m}_smooth" for m in ["G'", "G''", "Tan Delta", "G*"]]
-                df_disp = df.drop(columns=drop_cols).copy()
-                # convert G columns
-                for c in ["G'", "G''", "G*"]:
-                    if c in df_disp:
-                        df_disp[c] = pd.to_numeric(df_disp[c], errors='coerce') / 1e6
-                # rename to show units
-                df_disp = df_disp.rename(columns={"G'": "G' (MPa)", "G''": "G'' (MPa)", "G*": "G* (MPa)"})
-                # move "G* (MPa)" to index position 5
-                cols = list(df_disp.columns)
-                if "G* (MPa)" in cols:
-                    cols.insert(5, cols.pop(cols.index("G* (MPa)")))
-                    df_disp = df_disp[cols]
-                st.dataframe(df_disp, use_container_width=True, height=300)
+        import io
 
+        for name in mixes:
+            
+
+            # Prepare one Excel workbook per mix
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                for dynF, df in processed[name].items():
+                    # drop the _smooth cols
+                    drop_cols = [f"{m}_smooth" for m in ["G'", "G''", "Tan Delta", "G*"]]
+                    df_disp = df.drop(columns=drop_cols).copy()
+
+                    # convert G cols to MPa
+                    for c in ["G'", "G''", "G*"]:
+                        if c in df_disp:
+                            df_disp[c] = pd.to_numeric(df_disp[c], errors='coerce') / 1e6
+
+                    # rename for clarity
+                    df_disp = df_disp.rename(columns={
+                        "G'": "G' (MPa)",
+                        "G''": "G'' (MPa)",
+                        "G*": "G* (MPa)"
+                    })
+
+                    # move "G* (MPa)" into position 5
+                    cols = list(df_disp.columns)
+                    if "G* (MPa)" in cols:
+                        cols.insert(5, cols.pop(cols.index("G* (MPa)")))
+                        df_disp = df_disp[cols]
+
+                    # write sheet named by dyn F
+                    sheet = f"{int(float(dynF))}N"
+                    df_disp.to_excel(writer, sheet_name=sheet, index=False)
+
+            # finalize buffer
+            buffer.seek(0)
+
+            # download button + optional preview
+            c1, c2 = st.columns([8.5,1.5])
+            with c1:
+                mix = name.rsplit('.',1)[0]
+                st.markdown(f"##### {mix}")
+                st.markdown("The data will be downloaded as an Excel file with separate sheets for each dyn F value.")
+            with c2:
+                st.download_button(
+                    label="Download all data",
+                    data=buffer,
+                    file_name=f"{mix}_raw_data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            
+                        # (Optional) show first mini-test sheet as preview
+            first_df = next(iter(processed[name].values())).drop(columns=drop_cols).copy()
+            for c in ["G'", "G''", "G*"]:
+                if c in first_df:
+                    first_df[c] = pd.to_numeric(first_df[c], errors='coerce') / 1e6
+            first_df = first_df.rename(columns={"G'":"G' (MPa)","G''":"G'' (MPa)","G*":"G* (MPa)"})
+            cols = list(first_df.columns)
+            if "G* (MPa)" in cols:
+                cols.insert(5, cols.pop(cols.index("G* (MPa)")))
+                first_df = first_df[cols]
+            st.dataframe(first_df, use_container_width=True, height=300)
 
 
