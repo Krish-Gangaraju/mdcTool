@@ -134,7 +134,7 @@ def aggregate_by_degree(df: pd.DataFrame, degree_col: str, smooth_cols: list[str
 
 
 # ——— Streamlit  ———
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="MDC Post-Processing Tool", layout="wide")
 st.title("MDC Post-Processing Tool")
 
 mode = st.selectbox("Choose sweep type:", ["Strain Sweep", "Temperature Sweep"])
@@ -189,14 +189,14 @@ with tab_graph:
         st.subheader("Strain Sweep Graphs")
         col1, col2 = st.columns([1, 1], gap="large")
         with col1:
-            phase = st.radio("Phase", ["Both","Go","Return"], horizontal=True)
+            phase = st.radio("Phase", ["Both", "Go", "Return"], horizontal=True)
         with col2:
-            grid_on = st.radio("Grid lines", ["On","Off"], horizontal=True) == "On"
+            grid_on = st.radio("Grid lines", ["On", "Off"], horizontal=True) == "On"
 
         st.markdown("**Select mixes to plot**")
         mixes = []
         for name in sorted(processed):
-            label = name.rsplit('.',1)[0]
+            label = name.rsplit('.', 1)[0]
             if st.checkbox(label, value=True, key=f"cb_graph_{name}"):
                 mixes.append(name)
         if not mixes:
@@ -209,8 +209,20 @@ with tab_graph:
             plot_cols = st.columns(2, gap="large")
             for metric, pc in zip(row, plot_cols):
                 with pc:
-                    title = st.text_input(f"**Title for {metric}**", value=f"{metric} vs Strain ({phase})", key=f"title_{metric}")
+                    title = st.text_input(
+                        f"**Title for {metric}**",
+                        value=f"{metric} vs Strain ({phase})",
+                        key=f"title_{metric}"
+                    )
+
+                    # start the figure & axes
                     fig, ax = plt.subplots()
+
+                    # we'll track the global y‐min/max across all mixes
+                    global_y_min = float('inf')
+                    global_y_max = float('-inf')
+
+                    # plot each mix
                     for name in mixes:
                         df = processed[name].copy()
                         peak = df["dyn Str"].idxmax()
@@ -219,26 +231,48 @@ with tab_graph:
                         elif phase == "Return":
                             df = df.loc[peak:]
                         df = df[df["dyn Str"] > 0]
+
                         y = df[f"{metric}_smooth"] if metric != "G*" else df["G*_smooth"]
                         if metric in ("G'", "G''", "G*"):
-                            y *= 1e-6
-                        ax.plot(df["dyn Str"], y, label=name.rsplit('.',1)[0], linewidth=1.5)
+                            y = y * 1e-6
 
-                    # force exponent range from 10^-3 upward
+                        # update our global y‐bounds
+                        if not y.empty:
+                            global_y_min = min(global_y_min, y.min())
+                            global_y_max = max(global_y_max, y.max())
+
+                        ax.plot(
+                            df["dyn Str"],
+                            y,
+                            label=name.rsplit('.', 1)[0],
+                            linewidth=1.5
+                        )
+
+                    # force exponent range from 10^-3 upward (same as before)
                     min_e = -3
-                    max_e = int(np.ceil(np.log10(df["dyn Str"].max())))
-                    ticks = [10**e for e in range(min_e, max_e+1)]
+                    max_e = int(np.ceil(np.log10(
+                        max(processed[name]["dyn Str"].max() for name in mixes)
+                    )))
+                    ticks = [10**e for e in range(min_e, max_e + 1)]
+                    ax.set_xscale('log')
+                    ax.set_xticks(ticks)
+                    ax.set_xlim(ticks[0], ticks[-1])
+                    ax.set_xticklabels([f"{t:g}" for t in ticks])
 
-                    ax.set_xscale('log'); ax.set_xticks(ticks); ax.set_xlim(ticks[0], ticks[-1]); ax.set_xticklabels([f"{t:g}" for t in ticks])
-                    y_min, y_max = y.min(), y.max()
-                    padding = 0.5 * (y_max - y_min)
-                    ax.set_ylim(y_min - padding, y_max + padding)
+                    # apply a 50% margin based on the global max y
+                    padding = 0.4 * global_y_max
+                    y_lower = global_y_min - padding
+                    y_upper = global_y_max + padding
 
-                    ax.grid(grid_on); ax.set_xlabel("Strain [%]")
+                    ax.set_ylim(y_lower, y_upper)
+                    ax.grid(grid_on)
+                    ax.set_xlabel("Strain [%]")
+
                     unit = " [MPa]" if metric in ("G'", "G''", "G*") else ""
                     ax.set_ylabel(metric + unit)
                     ax.set_title(title)
                     ax.legend(fontsize="small", loc="best")
+
                     pc.pyplot(fig, use_container_width=True)
 
 
@@ -484,6 +518,7 @@ with tab_key:
                 st.download_button(label=f"Download {label}", data=buf, file_name=f"{label}_keys.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             st.dataframe(summary_df, use_container_width=True, height=400)
+            st.markdown("---")
 
 
 
